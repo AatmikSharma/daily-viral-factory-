@@ -1,0 +1,31 @@
+name: Daily Viral Short to Telegram
+
+on:
+  schedule:
+    # Runs automatically every single day at 13:00 UTC (6:30 PM IST)
+    - cron: '0 13 * * *'
+  workflow_dispatch: # Allows one-tap manual test run
+
+jobs:
+  build-and-send:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg & Fonts
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install edge-tts
+
+      - name: Generate Short & Send to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python daily_shorts_telegram.py
