@@ -66,8 +66,7 @@ def get_curated_storyboard(topic: str) -> dict:
         ],
     }
 
-def create_fallback_card(dest_path: Path, scene_num: int, topic: str) -> None:
-    """Generates an aesthetic vertical motion background with FFmpeg if external image API times out."""
+def create_fallback_card(dest_path: Path, scene_num: int) -> None:
     colors = ["#1a102f", "#0f2027", "#200122", "#16222f", "#191919", "#0d1b2a"]
     bg_color = colors[(scene_num - 1) % len(colors)]
     cmd = [
@@ -79,7 +78,7 @@ def create_fallback_card(dest_path: Path, scene_num: int, topic: str) -> None:
     ]
     subprocess.run(cmd, check=True)
 
-def download_scene_image(prompt: str, dest_path: Path, seed: int, scene_num: int, topic: str) -> None:
+def download_scene_image(prompt: str, dest_path: Path, seed: int, scene_num: int) -> None:
     encoded_prompt = urllib.parse.quote(prompt)
     image_url = (
         f"https://image.pollinations.ai/prompt/{encoded_prompt}"
@@ -91,28 +90,20 @@ def download_scene_image(prompt: str, dest_path: Path, seed: int, scene_num: int
                 image_url,
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
             )
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=25) as resp:
                 dest_path.write_bytes(resp.read())
-                print(f"Downloaded AI frame for scene {scene_num}")
+                print(f"Downloaded image for scene {scene_num}")
                 return
         except Exception as e:
-            print(f"Image API attempt {attempt+1} error: {e}")
-            time.sleep(2)
+            print(f"Image API attempt {attempt+1} notice: {e}")
+            time.sleep(1)
 
-    print(f"Using local dynamic background for scene {scene_num}")
-    create_fallback_card(dest_path, scene_num, topic)
+    print(f"Generated clean motion background for scene {scene_num}")
+    create_fallback_card(dest_path, scene_num)
 
-async def synthesize_scene_audio(text: str, audio_path: Path, srt_path: Path) -> float:
+async def synthesize_scene_audio(text: str, audio_path: Path) -> float:
     communicate = edge_tts.Communicate(text, VOICE_NAME, rate="+8%")
-    submaker = edge_tts.SubMaker()
-    with open(audio_path, "wb") as audio_file:
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                audio_file.write(chunk["data"])
-            elif chunk["type"] == "WordBoundary":
-                submaker.feed(chunk)
-
-    srt_path.write_text(submaker.get_srt(), encoding="utf-8")
+    await communicate.save(str(audio_path))
     return get_audio_duration(audio_path)
 
 def get_audio_duration(audio_path: Path) -> float:
@@ -152,47 +143,16 @@ def render_animated_scene(image_path: Path, audio_path: Path, duration: float, o
     ]
     subprocess.run(cmd, check=True)
 
-def offset_srt_timestamps(srt_text: str, offset_seconds: float, start_index: int) -> tuple[str, int]:
-    def shift_tc(match: re.Match) -> str:
-        h, m, s, ms = map(int, match.groups())
-        total_ms = int((h * 3600 + m * 60 + s + offset_seconds) * 1000) + ms
-        nh = total_ms // 3600000
-        total_ms %= 3600000
-        nm = total_ms // 60000
-        total_ms %= 60000
-        ns = total_ms // 1000
-        nms = total_ms % 1000
-        return f"{nh:02d}:{nm:02d}:{ns:02d},{nms:03d}"
-
-    blocks = [b.strip() for b in srt_text.strip().split("\n\n") if b.strip()]
-    out_blocks = []
-    idx = start_index
-    for block in blocks:
-        lines = block.splitlines()
-        if len(lines) >= 2:
-            tc_line = re.sub(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})", shift_tc, lines[1])
-            payload = " ".join(lines[2:])
-            out_blocks.append(f"{idx}\n{tc_line}\n{payload}")
-            idx += 1
-    return "\n\n".join(out_blocks), idx
-
-def merge_and_burn_subtitles(scene_clips: list[Path], combined_srt: Path, final_video_path: Path) -> None:
+def merge_scenes(scene_clips: list[Path], final_video_path: Path) -> None:
     concat_list = OUTPUT_DIR / "concat_list.txt"
     concat_list.write_text("\n".join(f"file '{clip.resolve()}'" for clip in scene_clips), encoding="utf-8")
-    merged_raw = OUTPUT_DIR / "merged_raw.mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(merged_raw)],
-        check=True,
-    )
-
-    srt_escaped = str(combined_srt.resolve()).replace("\\", "/").replace(":", "\\:")
-    style = "Fontname=DejaVu Sans,Fontsize=18,PrimaryColour=&H0000FFFF,OutlineColour=&H00000000,BackColour=&H80000000,Bold=1,BorderStyle=1,Outline=3,Shadow=2,Alignment=2,MarginV=65"
     subprocess.run(
         [
-            "ffmpeg", "-y", "-i", str(merged_raw),
-            "-vf", f"subtitles='{srt_escaped}':force_style='{style}'",
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
             "-c:v", "libx264", "-preset", "fast", "-crf", "19",
-            "-c:a", "copy", str(final_video_path),
+            "-c:a", "aac", "-b:a", "192k",
+            str(final_video_path)
         ],
         check=True,
     )
@@ -202,10 +162,10 @@ def send_to_telegram(video_path: Path, title: str, summary: str) -> None:
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
     if not (bot_token and chat_id):
-        print("Telegram delivery skipped: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not provided.")
+        print("Telegram delivery skipped: credentials not provided.")
         return
 
-    caption = f"🎬 {title}\n\n{summary}\n\n👉 Tap Save/Share -> YouTube Shorts!"
+    caption = f"🎬 {title}\n\n{summary}\n\n👉 Tap Save to Gallery -> Share to YouTube Shorts!"
     boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
     url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
 
@@ -243,30 +203,18 @@ async def main() -> None:
     day_seed = int(datetime.date.today().strftime("%Y%m%d"))
     random.seed(day_seed)
     topic = os.getenv("CUSTOM_TOPIC") or random.choice(VIRAL_NICHES)
-    print(f"[1/4] Generating viral storyboard: {topic}")
+    print(f"[1/3] Generating storyboard: {topic}")
     storyboard = get_curated_storyboard(topic)
 
     scene_clips = []
-    combined_srt_parts = []
-    cumulative_time = 0.0
-    srt_idx = 1
-
     for idx, scene in enumerate(storyboard["scenes"], start=1):
-        print(f"[2/4] Generating Scene {idx}/6...")
+        print(f"[2/3] Rendering Scene {idx}/6...")
         img_path = SCENES_DIR / f"scene_{idx:02d}.jpg"
         aud_path = SCENES_DIR / f"scene_{idx:02d}.mp3"
-        srt_path = SCENES_DIR / f"scene_{idx:02d}.srt"
         clip_path = SCENES_DIR / f"scene_{idx:02d}.mp4"
 
-        download_scene_image(scene["image_prompt"], img_path, seed=day_seed + idx, scene_num=idx, topic=topic)
-        duration = await synthesize_scene_audio(scene["narration"], aud_path, srt_path)
-
-        shifted_srt, srt_idx = offset_srt_timestamps(
-            srt_path.read_text(encoding="utf-8"), cumulative_time, srt_idx
-        )
-        if shifted_srt:
-            combined_srt_parts.append(shifted_srt)
-        cumulative_time += duration
+        download_scene_image(scene["image_prompt"], img_path, seed=day_seed + idx, scene_num=idx)
+        duration = await synthesize_scene_audio(scene["narration"], aud_path)
 
         render_animated_scene(
             image_path=img_path,
@@ -277,16 +225,13 @@ async def main() -> None:
         )
         scene_clips.append(clip_path)
 
-    combined_srt_path = OUTPUT_DIR / "combined_captions.srt"
-    combined_srt_path.write_text("\n\n".join(combined_srt_parts), encoding="utf-8")
-
     final_video = OUTPUT_DIR / "daily_viral_short.mp4"
-    print("[3/4] Burning animated captions & creating final MP4...")
-    merge_and_burn_subtitles(scene_clips, combined_srt_path, final_video)
+    print("[3/3] Merging scenes and exporting final 1080x1920 Short...")
+    merge_scenes(scene_clips, final_video)
 
     title = storyboard.get("title", "Daily Viral Short #shorts")
     caption = storyboard.get("caption_summary", "#shorts #facts #viral")
-    print("[4/4] Sending completed video to your Telegram...")
+    print("Sending completed video to your Telegram...")
     send_to_telegram(final_video, title, caption)
 
 if __name__ == "__main__":
