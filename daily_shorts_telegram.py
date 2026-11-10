@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 100% Free Daily Animated YouTube Shorts Generator -> Direct Telegram Delivery
@@ -10,6 +11,7 @@ import os
 import random
 import re
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -64,18 +66,41 @@ def get_curated_storyboard(topic: str) -> dict:
         ],
     }
 
-def download_scene_image(prompt: str, dest_path: Path, seed: int) -> None:
+def create_fallback_card(dest_path: Path, scene_num: int, topic: str) -> None:
+    """Generates an aesthetic vertical motion background with FFmpeg if external image API times out."""
+    colors = ["#1a102f", "#0f2027", "#200122", "#16222f", "#191919", "#0d1b2a"]
+    bg_color = colors[(scene_num - 1) % len(colors)]
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"color=c={bg_color}:s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:d=1",
+        "-frames:v", "1",
+        str(dest_path),
+    ]
+    subprocess.run(cmd, check=True)
+
+def download_scene_image(prompt: str, dest_path: Path, seed: int, scene_num: int, topic: str) -> None:
     encoded_prompt = urllib.parse.quote(prompt)
     image_url = (
         f"https://image.pollinations.ai/prompt/{encoded_prompt}"
-        f"?width={VIDEO_WIDTH}&height={VIDEO_HEIGHT}&seed={seed}&nologo=true&model=flux"
+        f"?width={VIDEO_WIDTH}&height={VIDEO_HEIGHT}&seed={seed}&nologo=true"
     )
-    req = urllib.request.Request(
-        image_url,
-        headers={"User-Agent": "Mozilla/5.0 (AutoShortsDelivery/1.0)"},
-    )
-    with urllib.request.urlopen(req, timeout=90) as resp:
-        dest_path.write_bytes(resp.read())
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(
+                image_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                dest_path.write_bytes(resp.read())
+                print(f"Downloaded AI frame for scene {scene_num}")
+                return
+        except Exception as e:
+            print(f"Image API attempt {attempt+1} error: {e}")
+            time.sleep(2)
+
+    print(f"Using local dynamic background for scene {scene_num}")
+    create_fallback_card(dest_path, scene_num, topic)
 
 async def synthesize_scene_audio(text: str, audio_path: Path, srt_path: Path) -> float:
     communicate = edge_tts.Communicate(text, VOICE_NAME, rate="+8%")
@@ -233,7 +258,7 @@ async def main() -> None:
         srt_path = SCENES_DIR / f"scene_{idx:02d}.srt"
         clip_path = SCENES_DIR / f"scene_{idx:02d}.mp4"
 
-        download_scene_image(scene["image_prompt"], img_path, seed=day_seed + idx)
+        download_scene_image(scene["image_prompt"], img_path, seed=day_seed + idx, scene_num=idx, topic=topic)
         duration = await synthesize_scene_audio(scene["narration"], aud_path, srt_path)
 
         shifted_srt, srt_idx = offset_srt_timestamps(
